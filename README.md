@@ -190,6 +190,13 @@ All threads share one connection, serialised by a lock. SQLite permits only one
 writer at a time, and a second connection would hit `SQLITE_BUSY` while the
 orchestrator's batch was open.
 
+Reprocessing takes the smallest pending number first, which means ordering by
+`(LENGTH(Numero), Numero)` — numeric order for text holding non-negative
+integers. Each queue carries an index on that expression. Without it SQLite
+scans the table and builds a temporary B-tree on every claim: 68 ms on a queue
+of 781,000 rows, held under the lock every thread shares, and growing with the
+queue.
+
 Two processes sharing a database would both resume from the same point and the
 second would crash on the uniqueness constraint. A lock file next to the
 database prevents it; the operating system releases it even if the process dies

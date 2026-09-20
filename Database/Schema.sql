@@ -74,3 +74,18 @@ CREATE TABLE IF NOT EXISTS NaoConvergiram1M (
     Digitos     INTEGER NOT NULL,
     CalculadoEm TEXT    NOT NULL
 );
+
+-- Reprocessing takes the smallest pending number first, which means ordering by
+-- (LENGTH(Numero), Numero) — numeric order for text that holds non-negative
+-- integers. Without an index on that expression SQLite scans the whole table and
+-- builds a temporary B-tree on every claim: measured at 68 ms on a queue of
+-- 781,000 rows, held under the lock every thread shares, and growing with the
+-- queue. With the index the same call is immediate.
+CREATE INDEX IF NOT EXISTS IX_NaoConvergiram_Ordem
+    ON NaoConvergiram (LENGTH(Numero), Numero);
+
+CREATE INDEX IF NOT EXISTS IX_NaoConvergiram100k_Ordem
+    ON NaoConvergiram100k (LENGTH(Numero), Numero);
+
+CREATE INDEX IF NOT EXISTS IX_NaoConvergiram1M_Ordem
+    ON NaoConvergiram1M (LENGTH(Numero), Numero);
