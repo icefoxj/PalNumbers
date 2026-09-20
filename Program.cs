@@ -48,6 +48,11 @@ switch (args)
         WriteSummary(databasePath, schemaPath, TriageLimit, DeepLimit);
         return 0;
 
+    // Asks every running instance to wind down, wherever its database is, and
+    // waits for them. Computes nothing itself.
+    case ["--stop"]:
+        return StopRunningInstances();
+
     case []:
         break;                  // normal run
 
@@ -57,6 +62,7 @@ switch (args)
         Console.Error.WriteLine("Usage:");
         Console.Error.WriteLine("  PalNumbers                    run the sequence until interrupted");
         Console.Error.WriteLine("  PalNumbers --summary          print the state of the database and exit");
+        Console.Error.WriteLine("  PalNumbers --stop             ask every running instance to stop, and wait");
         Console.Error.WriteLine("  PalNumbers --create-db <path> create or update a database at that path");
         return 1;
 }
@@ -114,6 +120,24 @@ Console.CancelKeyPress += (_, e) =>
     e.Cancel = true;            // stops Windows from killing the process outright
     cancellation.Cancel();      // the main loop winds down and closes the batch
 };
+
+// A named event, one per process, lets "--stop" from another window ask this
+// instance to wind down through exactly the same path as Ctrl+C: the block in
+// flight is dropped, the batch is closed and the summary is printed. Killing
+// the process would work too, but it would throw away the block instead of
+// ending it cleanly.
+//
+// One event per process id rather than a shared one: a single event would
+// either release just one waiter or stay signalled and stop the next instance
+// to start.
+using EventWaitHandle stopSignal = new(false, EventResetMode.ManualReset, StopEventName(Environment.ProcessId));
+
+RegisteredWaitHandle stopWait = ThreadPool.RegisterWaitForSingleObject(
+    stopSignal,
+    (_, _) => cancellation.Cancel(),
+    state: null,
+    Timeout.Infinite,
+    executeOnlyOnce: true);
 
 // With several cores computing, writing to the screen becomes the bottleneck.
 // The buffer is flushed at the end of every block, so output stays live.
@@ -247,6 +271,8 @@ while (!cancellation.IsCancellationRequested)
     number += blockSize;
 }
 
+stopWait.Unregister(null);
+
 // Gives the reprocessing threads a chance to leave on their own before the
 // repository is closed under them. The deadline is total, not per thread.
 DateTime deadline = DateTime.UtcNow.AddSeconds(5);
@@ -308,6 +334,90 @@ static FileStream? TryLock(string databasePath)
     {
         return null;
     }
+}
+
+// Name of the event a given instance listens on. Local\ scopes it to the
+// current logon session, which is where instances started from a terminal live.
+static string StopEventName(int processId) => @"Local\PalNumbers-stop-" + processId;
+
+// Asks every other running instance to stop and waits for them to go.
+//
+// The request is a signal, not a kill: each instance takes the same route it
+// takes on Ctrl+C, so the block in flight is dropped rather than half written,
+// the batch is closed and the summary is printed in its own window.
+static int StopRunningInstances()
+{
+    // Named events are a Windows facility, and so is the rest of this program's
+    // console handling.
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--stop is supported on Windows only.");
+        return 1;
+    }
+
+    using Process self = Process.GetCurrentProcess();
+
+    Process[] others = [.. Process.GetProcessesByName(self.ProcessName).Where(other => other.Id != self.Id)];
+
+    if (others.Length == 0)
+    {
+        Console.WriteLine("No PalNumbers instance is running.");
+        return 0;
+    }
+
+    Console.WriteLine($"Found {others.Length} running instance(s).");
+
+    List<Process> asked = [];
+    int unreachable = 0;
+
+    foreach (Process other in others)
+    {
+        if (EventWaitHandle.TryOpenExisting(StopEventName(other.Id), out EventWaitHandle? signal))
+        {
+            using (signal)
+            {
+                signal.Set();
+            }
+
+            Console.WriteLine($"  pid {other.Id}: stop requested");
+            asked.Add(other);
+        }
+        else
+        {
+            // Either an older build with no listener, or an instance running in
+            // another logon session, which Local\ does not reach.
+            Console.WriteLine($"  pid {other.Id}: could not be reached — stop it with Ctrl+C in its own window");
+            unreachable++;
+        }
+    }
+
+    // A stopping instance still has to drop its block, close the batch and let
+    // the reprocessing threads go, so give it room.
+    DateTime deadline = DateTime.UtcNow.AddSeconds(60);
+    int stopped = 0;
+
+    foreach (Process other in asked)
+    {
+        TimeSpan remaining = deadline - DateTime.UtcNow;
+        int milliseconds = remaining > TimeSpan.Zero ? (int)remaining.TotalMilliseconds : 0;
+
+        if (other.WaitForExit(milliseconds))
+        {
+            Console.WriteLine($"  pid {other.Id}: stopped");
+            stopped++;
+        }
+        else
+        {
+            Console.WriteLine($"  pid {other.Id}: still running after the deadline");
+        }
+
+        other.Dispose();
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"{stopped} of {others.Length} instance(s) stopped.");
+
+    return stopped == others.Length && unreachable == 0 ? 0 : 1;
 }
 
 static void WriteSummary(string databasePath, string schemaPath, int triageLimit, int deepLimit)

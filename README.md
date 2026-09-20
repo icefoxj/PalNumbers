@@ -58,8 +58,29 @@ reverse-and-add steps applied to it and is over 400,000 digits long.
 ```
 PalNumbers                    run the sequence until interrupted
 PalNumbers --summary          print the state of the database and exit
+PalNumbers --stop             ask every running instance to stop, and wait
 PalNumbers --create-db <path> create or update a database at that path
 ```
+
+`--stop` finds every running instance, whatever database it is working on, and
+asks it to wind down through the same path `Ctrl+C` takes: the block in flight
+is dropped rather than half written, the batch is closed and the instance prints
+its own summary. It is a request, not a kill — each instance is signalled
+through a named event it listens on, and `--stop` waits and reports what
+actually went:
+
+```
+Found 2 running instance(s).
+  pid 83376: could not be reached — stop it with Ctrl+C in its own window
+  pid 41520: stop requested
+  pid 41520: stopped
+
+1 of 2 instance(s) stopped.
+```
+
+An instance is out of reach when it is an older build with no listener, or when
+it runs in a different logon session. The exit code is 0 only when every
+instance found was stopped.
 
 `--summary` performs no computation and can be run while another instance is
 working — SQLite's WAL mode allows reading during writes:
