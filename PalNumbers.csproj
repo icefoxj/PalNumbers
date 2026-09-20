@@ -11,9 +11,9 @@
     <RootNamespace>PalNumbers</RootNamespace>
   </PropertyGroup>
 
-  <!-- Destino de produção: "dotnet publish -c Release" cai em Producao/ na
-       raiz do projeto. Passar -o na linha de comando continua mandando para
-       onde se quiser, porque a propriedade global vence esta. -->
+  <!-- Production target: "dotnet publish -c Release" lands in Producao/ at the
+       project root. Passing -o on the command line still sends it anywhere you
+       like, because the global property wins over this one. -->
   <PropertyGroup>
     <PublishDir Condition="'$(PublishDir)' == ''">$(MSBuildProjectDirectory)/Producao/</PublishDir>
   </PropertyGroup>
@@ -22,27 +22,27 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
 
-  <!-- O script de esquema acompanha o executável: é ele que cria o banco de
-       trabalho na primeira execução. -->
+  <!-- The schema script travels with the executable: it is what creates the
+       working database on the first run. -->
   <ItemGroup>
-    <None Update="Database/Esquema.sql">
-      <Link>Esquema.sql</Link>
+    <None Update="Database/Schema.sql">
+      <Link>Schema.sql</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
 
-  <!-- Mantém, na raiz do projeto e junto do script, um banco com o esquema
-       aplicado. O banco de trabalho fica ao lado do executável e não é tocado
-       aqui — é o que faz o progresso sobreviver a uma recompilação. -->
-  <Target Name="PrepararBancoDoProjeto" AfterTargets="Build">
-    <Exec Command="&quot;$(TargetDir)$(TargetName).exe&quot; --criar-banco &quot;$(MSBuildProjectDirectory)/Database/PalNumbers.db&quot;" />
+  <!-- Keeps a database with the schema applied in the project root, next to the
+       script. The working database lives beside the executable and is not
+       touched here — that is what lets progress survive a rebuild. -->
+  <Target Name="PrepareProjectDatabase" AfterTargets="Build">
+    <Exec Command="&quot;$(TargetDir)$(TargetName).exe&quot; --create-db &quot;$(MSBuildProjectDirectory)/Database/PalNumbers.db&quot;" />
   </Target>
 
-  <!-- Garante o banco ao lado do executável publicado. Aplicar o esquema é
-       idempotente, então republicar por cima de uma pasta de produção em uso
-       atualiza os binários sem tocar nos dados já gravados. -->
-  <Target Name="PrepararBancoDeProducao" AfterTargets="Publish">
-    <Exec Command="&quot;$(PublishDir)$(TargetName).exe&quot; --criar-banco &quot;$(PublishDir)PalNumbers.db&quot;" />
+  <!-- Ensures the database next to the published executable. Applying the
+       schema is idempotent, so publishing over a production folder in use
+       updates the binaries without touching the data already stored. -->
+  <Target Name="PrepareProductionDatabase" AfterTargets="Publish">
+    <Exec Command="&quot;$(PublishDir)$(TargetName).exe&quot; --create-db &quot;$(PublishDir)PalNumbers.db&quot;" />
   </Target>
 
 </Project>

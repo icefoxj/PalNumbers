@@ -5,291 +5,295 @@ using System.Numerics;
 using System.Text;
 using PalNumbers;
 
-// PalNumbers — inverter e somar até obter um palíndromo.
+// PalNumbers — reverse-and-add until a palindrome appears.
 //
-// Regra: soma-se o número ao seu inverso e verifica-se se o resultado é um
-// palíndromo. Se não for, repete-se a operação sobre o resultado, contando
-// quantas iterações foram necessárias.   (12 -> 12 + 21 = 33, 1 iteração)
+// The rule: add a number to its reverse and check whether the result is a
+// palindrome. If it is not, repeat on the result, counting how many iterations
+// it took.   (12 -> 12 + 21 = 33, one iteration)
 //
-// A sequência 0, 1, 2, 3, ... corre sem limite, gravando cada resultado no
-// banco ao lado do executável, e só para com Ctrl+C. Na execução seguinte
-// retoma do ponto onde parou.
+// The sequence 0, 1, 2, 3, ... runs with no upper bound, storing every result
+// in the database next to the executable, and stops only on Ctrl+C. The next
+// run resumes from where it left off.
 //
-// Quem não converge desce uma cascata de limites crescentes, tocada por
-// threads dedicadas fora do orçamento de núcleos da sequência principal.
+// Numbers that do not converge descend a cascade of increasing limits, worked
+// by dedicated threads outside the core budget of the main sequence.
 
 Console.OutputEncoding = Encoding.UTF8;
 
-const int LimiteIteracoes = 10_000;         // sequência principal
-const int LimiteTriagem = 100_000;          // primeiro degrau do reprocessamento
-const int LimiteAmpliado = 1_000_000;       // segundo degrau
-const int LinhasPorCabecalho = 50;
+const int MainLimit = 10_000;               // main sequence
+const int TriageLimit = 100_000;            // first step of reprocessing
+const int DeepLimit = 1_000_000;            // second step
+const int RowsPerHeader = 50;
 
-string caminhoEsquema = Path.Combine(AppContext.BaseDirectory, "Esquema.sql");
-string caminhoBanco = Path.Combine(AppContext.BaseDirectory, "PalNumbers.db");
+string schemaPath = Path.Combine(AppContext.BaseDirectory, "Schema.sql");
+string databasePath = Path.Combine(AppContext.BaseDirectory, "PalNumbers.db");
 
 switch (args)
 {
-    // Usado pelo build para manter o banco da raiz do projeto em dia; cria o
-    // arquivo se não existir, aplica o esquema e sai sem calcular nada.
-    case ["--criar-banco", string destino]:
-        using (Repositorio criacao = new(destino, caminhoEsquema))
+    // Used by the build to keep the database in the project root up to date;
+    // creates the file if missing, applies the schema and exits without
+    // computing anything.
+    case ["--create-db", string target]:
+        using (Repository creation = new(target, schemaPath))
         {
-            Console.WriteLine($"Banco pronto: {Path.GetFullPath(destino)}");
+            Console.WriteLine($"Database ready: {Path.GetFullPath(target)}");
         }
 
         return 0;
 
-    // Só mostra o estado do banco e sai: nenhum número é calculado. Pode ser
-    // usado com o programa rodando em outra janela — o SQLite em modo WAL
-    // deixa ler enquanto se grava.
-    case ["--resumo"]:
-        EscreverResumo(caminhoBanco, caminhoEsquema, LimiteTriagem, LimiteAmpliado);
+    // Only prints the state of the database and exits: no number is computed.
+    // Safe to use while the program runs in another window — SQLite in WAL mode
+    // allows reading during writes.
+    case ["--summary"]:
+        WriteSummary(databasePath, schemaPath, TriageLimit, DeepLimit);
         return 0;
 
     case []:
-        break;                  // execução normal
+        break;                  // normal run
 
     default:
-        Console.Error.WriteLine($"Opção desconhecida: {string.Join(' ', args)}");
+        Console.Error.WriteLine($"Unknown option: {string.Join(' ', args)}");
         Console.Error.WriteLine();
-        Console.Error.WriteLine("Uso:");
-        Console.Error.WriteLine("  PalNumbers                      calcula a sequência até ser interrompido");
-        Console.Error.WriteLine("  PalNumbers --resumo             mostra o estado do banco e sai");
-        Console.Error.WriteLine("  PalNumbers --criar-banco <arq>  cria ou atualiza o banco no caminho dado");
+        Console.Error.WriteLine("Usage:");
+        Console.Error.WriteLine("  PalNumbers                    run the sequence until interrupted");
+        Console.Error.WriteLine("  PalNumbers --summary          print the state of the database and exit");
+        Console.Error.WriteLine("  PalNumbers --create-db <path> create or update a database at that path");
         return 1;
 }
 
-// Metade dos processadores lógicos da máquina para o cálculo da sequência.
-// As threads de reprocessamento e a orquestradora ficam FORA desta conta.
-int trabalhadores = Math.Max(1, Environment.ProcessorCount / 2);
+// Half of the machine's logical processors for computing the sequence. The
+// reprocessing threads and the orchestrator are NOT part of this budget.
+int workers = Math.Max(1, Environment.ProcessorCount / 2);
 
-// Os degraus da cascata. O custo cresce com o quadrado das iterações — 100.000
-// levam ~9s por número e 1.000.000 levam ~15,5 min, medidos — então as quatro
-// threads baratas fazem a triagem e uma só, cara, recebe o que sobrou.
-Estagio[] estagios =
+// The steps of the cascade. Cost grows with the square of the iteration count —
+// 100,000 take about 9s per number and 1,000,000 about 15.5 minutes, both
+// measured — so the four cheap threads do the triage and a single expensive one
+// receives what survived.
+Stage[] stages =
 [
-    new("triagem", Tabelas.DezMil, Tabelas.CemMil, LimiteTriagem, Threads: 4),
-    new("profundo", Tabelas.CemMil, Tabelas.UmMilhao, LimiteAmpliado, Threads: 1),
+    new("triage", Tables.TenThousand, Tables.HundredThousand, TriageLimit, Threads: 4),
+    new("deep", Tables.HundredThousand, Tables.Million, DeepLimit, Threads: 1),
 ];
 
-// Os números são calculados em blocos: o bloco inteiro é resolvido em
-// paralelo e só depois gravado e impresso, em ordem crescente. Isso mantém
-// duas garantias que o paralelismo quebraria de outra forma — a tela continua
-// em ordem, e o banco nunca fica com um número gravado e outro menor
-// faltando, que é o que permite retomar pelo maior número gravado.
+// Numbers are computed in blocks: the whole block is solved in parallel and
+// only then stored and printed, in ascending order. That preserves two
+// guarantees plain parallelism would break — the screen stays ordered, and the
+// database never holds a number while a smaller one is missing, which is what
+// makes resuming by the largest number stored correct.
 //
-// O bloco é grande de propósito. O custo por número é muito desigual: os que
-// não convergem gastam as 10.000 iterações e custam uns mil números comuns.
-// Num bloco pequeno sobram poucos números caros para distribuir, e o bloco
-// acaba durando o tempo do worker mais azarado. Medido nesta máquina, com 16
-// workers: bloco de 1.024 rende 9,6 núcleos efetivos; 8.192 rende 14,2.
-int tamanhoBloco = 512 * trabalhadores;
+// The block is deliberately large. Per-number cost is very uneven: those that
+// do not converge burn all 10,000 iterations and cost about a thousand ordinary
+// numbers. In a small block there are too few expensive numbers to spread
+// around, and the block ends up lasting as long as the unluckiest worker.
+// Measured on this machine with 16 workers: a block of 1,024 yields 9.6
+// effective cores; 8,192 yields 14.2.
+int blockSize = 512 * workers;
 
-// Duas instâncias sobre o mesmo banco se atropelam: as duas retomam do mesmo
-// ponto e a segunda esbarra na restrição de unicidade de Numero, derrubando o
-// processo no meio de um bloco. O arquivo de trava impede isso, e o sistema o
-// libera sozinho quando o processo termina, inclusive se terminar mal.
+// Two instances on the same database trip over each other: both resume from the
+// same point and the second hits the uniqueness constraint on Numero, bringing
+// the process down in the middle of a block. The lock file prevents that, and
+// the operating system releases it when the process ends, even if it ends
+// badly.
 //
-// Só a execução normal trava; --resumo continua podendo ler a qualquer hora.
-using FileStream? trava = TentarTravar(caminhoBanco);
+// Only the normal run locks; --summary can still read at any time.
+using FileStream? lockFile = TryLock(databasePath);
 
-if (trava is null)
+if (lockFile is null)
 {
-    Console.Error.WriteLine("Já há uma instância do PalNumbers usando este banco:");
-    Console.Error.WriteLine($"  {caminhoBanco}");
+    Console.Error.WriteLine("Another instance of PalNumbers is already using this database:");
+    Console.Error.WriteLine($"  {databasePath}");
     Console.Error.WriteLine();
-    Console.Error.WriteLine("Encerre a outra antes de começar, ou use --resumo para ver o estado sem calcular.");
+    Console.Error.WriteLine("Stop the other one first, or use --summary to see the state without computing.");
     return 1;
 }
 
-using CancellationTokenSource cancelamento = new();
+using CancellationTokenSource cancellation = new();
 
 Console.CancelKeyPress += (_, e) =>
 {
-    e.Cancel = true;            // impede o encerramento abrupto do processo
-    cancelamento.Cancel();      // o laço principal encerra e fecha o lote
+    e.Cancel = true;            // stops Windows from killing the process outright
+    cancellation.Cancel();      // the main loop winds down and closes the batch
 };
 
-// Com vários núcleos calculando, a escrita na tela passa a ser o gargalo.
-// O buffer é descarregado ao fim de cada bloco, então a saída continua viva.
-StreamWriter saida = new(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16)
+// With several cores computing, writing to the screen becomes the bottleneck.
+// The buffer is flushed at the end of every block, so output stays live.
+StreamWriter output = new(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16)
 {
     AutoFlush = false,
 };
-Console.SetOut(saida);
+Console.SetOut(output);
 
-using Repositorio repositorio = new(caminhoBanco, caminhoEsquema);
+using Repository repository = new(databasePath, schemaPath);
 
-BigInteger numero = repositorio.ProximoNumero();
-int threadsDeReprocessamento = estagios.Sum(static estagio => estagio.Threads);
+BigInteger number = repository.NextNumber();
+int reprocessingThreads = stages.Sum(static stage => stage.Threads);
 
 Console.WriteLine();
-Console.WriteLine($"{Cores.Titulo}Palíndromos por inversão e soma{Cores.Reset} {Cores.Discreto}— Ctrl+C para parar.{Cores.Reset}");
-Console.WriteLine($"{Cores.Rotulo}Banco:{Cores.Reset} {Cores.Numero}{caminhoBanco}{Cores.Reset}");
-Console.WriteLine($"{Cores.Rotulo}Cálculo:{Cores.Reset} {Cores.Numero}{trabalhadores}{Cores.Reset} de {Environment.ProcessorCount} núcleos {Cores.Discreto}— blocos de {tamanhoBloco:N0} números, limite de {LimiteIteracoes:N0}.{Cores.Reset}");
-Console.WriteLine($"{Cores.Rotulo}Threads:{Cores.Reset} {Cores.Discreto}1 orquestradora + {Cores.Reset}{Cores.Numero}{trabalhadores}{Cores.Reset}{Cores.Discreto} de cálculo + {Cores.Reset}{Cores.Numero}{threadsDeReprocessamento}{Cores.Reset}{Cores.Discreto} de reprocessamento = {1 + trabalhadores + threadsDeReprocessamento}.{Cores.Reset}");
+Console.WriteLine($"{Palette.Title}Palindromes by reverse-and-add{Palette.Reset} {Palette.Muted}— Ctrl+C to stop.{Palette.Reset}");
+Console.WriteLine($"{Palette.Label}Database:{Palette.Reset} {Palette.Number}{databasePath}{Palette.Reset}");
+Console.WriteLine($"{Palette.Label}Compute:{Palette.Reset} {Palette.Number}{workers}{Palette.Reset} of {Environment.ProcessorCount} cores {Palette.Muted}— blocks of {blockSize:N0} numbers, limit of {MainLimit:N0}.{Palette.Reset}");
+Console.WriteLine($"{Palette.Label}Threads:{Palette.Reset} {Palette.Muted}1 orchestrator + {Palette.Reset}{Palette.Number}{workers}{Palette.Reset}{Palette.Muted} compute + {Palette.Reset}{Palette.Number}{reprocessingThreads}{Palette.Reset}{Palette.Muted} reprocessing = {1 + workers + reprocessingThreads}.{Palette.Reset}");
 
-foreach (Estagio estagio in estagios)
+foreach (Stage stage in stages)
 {
-    Console.WriteLine($"  {Cores.Discreto}{estagio.Threads} thread(s) [{estagio.Nome}]{Cores.Reset} {Cores.Rotulo}{estagio.TabelaOrigem}{Cores.Reset} {Cores.Discreto}-> limite {estagio.Limite:N0} ->{Cores.Reset} {Cores.Rotulo}{estagio.TabelaDestino}{Cores.Reset}");
+    Console.WriteLine($"  {Palette.Muted}{stage.Threads} thread(s) [{stage.Name}]{Palette.Reset} {Palette.Label}{stage.SourceTable}{Palette.Reset} {Palette.Muted}-> limit {stage.Limit:N0} ->{Palette.Reset} {Palette.Label}{stage.TargetTable}{Palette.Reset}");
 }
 
-Console.WriteLine(numero.IsZero
-    ? $"{Cores.Discreto}Nenhum resultado anterior: começando do zero.{Cores.Reset}"
-    : $"{Cores.Discreto}Retomando a partir de{Cores.Reset} {Cores.Numero}{numero}{Cores.Reset}{Cores.Discreto}.{Cores.Reset}");
+Console.WriteLine(number.IsZero
+    ? $"{Palette.Muted}No previous results: starting from zero.{Palette.Reset}"
+    : $"{Palette.Muted}Resuming from{Palette.Reset} {Palette.Number}{number}{Palette.Reset}{Palette.Muted}.{Palette.Reset}");
 
-Contagens contagens = repositorio.Contar();
+Counts counts = repository.Count();
 
 Console.WriteLine();
-Console.WriteLine($"{Cores.Rotulo}Registros por tabela{Cores.Reset}");
-EscreverContagem(Tabelas.Palindromos, contagens.Palindromos, Cores.Palindromo, "convergiram");
-EscreverContagem(Tabelas.DezMil, contagens.DezMil, Cores.Alerta, $"fila da triagem ({LimiteTriagem:N0})");
-EscreverContagem(Tabelas.CemMil, contagens.CemMil, Cores.Iteracoes, $"fila do estágio profundo ({LimiteAmpliado:N0})");
-EscreverContagem(Tabelas.UmMilhao, contagens.UmMilhao, Cores.Iteracoes, "fim da cascata");
-EscreverContagem("total", contagens.Total, Cores.Numero, null);
+Console.WriteLine($"{Palette.Label}Rows per table{Palette.Reset}");
+WriteCount(Tables.Solved, counts.Solved, Palette.Palindrome, "converged");
+WriteCount(Tables.TenThousand, counts.TenThousand, Palette.Warning, $"triage queue ({TriageLimit:N0})");
+WriteCount(Tables.HundredThousand, counts.HundredThousand, Palette.Iterations, $"deep stage queue ({DeepLimit:N0})");
+WriteCount(Tables.Million, counts.Million, Palette.Iterations, "end of the cascade");
+WriteCount("total", counts.Total, Palette.Number, null);
 
-// As threads de reprocessamento avisam por esta fila; quem desenha a tela é
-// sempre a orquestradora, que a esvazia ao fim de cada bloco.
-ConcurrentQueue<Aviso> avisos = new();
-List<Thread> threadsReprocessamento = [];
+// The reprocessing threads report through this queue; the orchestrator is the
+// only one that draws, and drains it at the end of every block.
+ConcurrentQueue<Notice> notices = new();
+List<Thread> reprocessors = [];
 
-foreach (Estagio estagio in estagios)
+foreach (Stage stage in stages)
 {
-    for (int i = 1; i <= estagio.Threads; i++)
+    for (int i = 1; i <= stage.Threads; i++)
     {
-        Reprocessador reprocessador = new(repositorio, avisos, estagio, cancelamento.Token);
+        Reprocessor reprocessor = new(repository, notices, stage, cancellation.Token);
 
-        Thread thread = new(reprocessador.Executar)
+        Thread thread = new(reprocessor.Run)
         {
             IsBackground = true,
-            Name = $"reproc-{estagio.Nome}-{i}",
+            Name = $"reproc-{stage.Name}-{i}",
         };
 
         thread.Start();
-        threadsReprocessamento.Add(thread);
+        reprocessors.Add(thread);
     }
 }
 
-ParallelOptions opcoes = new()
+ParallelOptions options = new()
 {
-    MaxDegreeOfParallelism = trabalhadores,
-    CancellationToken = cancelamento.Token,
+    MaxDegreeOfParallelism = workers,
+    CancellationToken = cancellation.Token,
 };
 
-// Cada thread precisa da sua própria Calculadora: ela carrega os buffers de
-// dígitos entre as chamadas e não é segura para uso simultâneo. A reserva as
-// devolve de um bloco para o outro, para não recriar os buffers (que chegam a
-// milhares de dígitos) a cada bloco.
-ConcurrentBag<Calculadora> reserva = [];
+// Every thread needs its own Calculator: it carries the digit buffers between
+// calls and is not safe for concurrent use. The pool hands them back from one
+// block to the next, so the buffers — which reach thousands of digits — are not
+// rebuilt every block.
+ConcurrentBag<Calculator> pool = [];
 
-string[] origens = new string[tamanhoBloco];
-Resultado[] resultados = new Resultado[tamanhoBloco];
+string[] sources = new string[blockSize];
+Outcome[] outcomes = new Outcome[blockSize];
 
-Stopwatch cronometro = Stopwatch.StartNew();
-long processados = 0;
+Stopwatch stopwatch = Stopwatch.StartNew();
+long processed = 0;
 
-while (!cancelamento.IsCancellationRequested)
+while (!cancellation.IsCancellationRequested)
 {
-    for (int i = 0; i < tamanhoBloco; i++)
+    for (int i = 0; i < blockSize; i++)
     {
-        origens[i] = (numero + i).ToString(CultureInfo.InvariantCulture);
+        sources[i] = (number + i).ToString(CultureInfo.InvariantCulture);
     }
 
     try
     {
-        // O Parallel.For usa como worker a thread que o chama. Rodando dentro
-        // de um Task.Run, os 'trabalhadores' workers são todos do pool e esta
-        // thread fica só esperando — ela é a orquestradora, e não consome um
-        // dos núcleos reservados ao cálculo.
+        // Parallel.For uses the thread that calls it as one of its workers.
+        // Running it inside a Task.Run, all 'workers' workers come from the
+        // pool and this thread only waits — it is the orchestrator, and does
+        // not consume one of the cores reserved for computing.
         await Task.Run(
             () => Parallel.For(
                 0,
-                tamanhoBloco,
-                opcoes,
-                () => reserva.TryTake(out Calculadora? disponivel) ? disponivel : new Calculadora(),
-                (i, _, calculadora) =>
+                blockSize,
+                options,
+                () => pool.TryTake(out Calculator? free) ? free : new Calculator(),
+                (i, _, calculator) =>
                 {
-                    resultados[i] = calculadora.Calcular(origens[i], LimiteIteracoes, cancelamento.Token);
-                    return calculadora;
+                    outcomes[i] = calculator.Compute(sources[i], MainLimit, cancellation.Token);
+                    return calculator;
                 },
-                reserva.Add),
-            cancelamento.Token);
+                pool.Add),
+            cancellation.Token);
     }
     catch (OperationCanceledException)
     {
-        break;                  // bloco incompleto: descartado e refeito depois
+        break;                  // incomplete block: dropped and redone later
     }
 
-    for (int i = 0; i < tamanhoBloco; i++)
+    for (int i = 0; i < blockSize; i++)
     {
-        Resultado resultado = resultados[i];
-        repositorio.Registrar(origens[i], resultado);
+        Outcome outcome = outcomes[i];
+        repository.Record(sources[i], outcome);
 
-        if (processados % LinhasPorCabecalho == 0)
+        if (processed % RowsPerHeader == 0)
         {
-            EscreverCabecalho();
+            WriteHeader();
         }
 
-        EscreverLinha(origens[i], resultado);
-        processados++;
+        WriteRow(sources[i], outcome);
+        processed++;
     }
 
-    // O bloco só é dado como concluído depois de gravado por inteiro.
-    repositorio.Confirmar();
-    EsvaziarAvisos();
+    // The block counts as done only once it is stored in full.
+    repository.Commit();
+    DrainNotices();
     Console.Out.Flush();
 
-    numero += tamanhoBloco;
+    number += blockSize;
 }
 
-// Dá às threads de reprocessamento a chance de sair sozinhas antes de o
-// repositório ser fechado debaixo delas. O prazo é total, não por thread.
-DateTime prazo = DateTime.UtcNow.AddSeconds(5);
+// Gives the reprocessing threads a chance to leave on their own before the
+// repository is closed under them. The deadline is total, not per thread.
+DateTime deadline = DateTime.UtcNow.AddSeconds(5);
 
-foreach (Thread thread in threadsReprocessamento)
+foreach (Thread thread in reprocessors)
 {
-    TimeSpan restante = prazo - DateTime.UtcNow;
+    TimeSpan remaining = deadline - DateTime.UtcNow;
 
-    if (restante > TimeSpan.Zero)
+    if (remaining > TimeSpan.Zero)
     {
-        thread.Join(restante);
+        thread.Join(remaining);
     }
 }
 
-repositorio.Confirmar();
-EsvaziarAvisos();
-cronometro.Stop();
+repository.Commit();
+DrainNotices();
+stopwatch.Stop();
 
-TimeSpan tempo = cronometro.Elapsed;
+TimeSpan elapsed = stopwatch.Elapsed;
 
-string ultimo = processados == 0
-    ? "nenhum"
-    : (numero - BigInteger.One).ToString(CultureInfo.InvariantCulture);
+string lastNumber = processed == 0
+    ? "none"
+    : (number - BigInteger.One).ToString(CultureInfo.InvariantCulture);
 
-double porSegundo = tempo.TotalSeconds > 0 ? processados / tempo.TotalSeconds : 0;
+double perSecond = elapsed.TotalSeconds > 0 ? processed / elapsed.TotalSeconds : 0;
 
 Console.WriteLine();
 Console.WriteLine(
-    $"{Cores.Titulo}Parado.{Cores.Reset} {Cores.Numero}{processados:N0}{Cores.Reset} número(s) gravado(s) "
-    + $"{Cores.Discreto}— último:{Cores.Reset} {Cores.Numero}{ultimo}{Cores.Reset} "
-    + $"{Cores.Discreto}— tempo:{Cores.Reset} {Cores.Numero}{(int)tempo.TotalHours:D2}:{tempo.Minutes:D2}:{tempo.Seconds:D2}{Cores.Reset} "
-    + $"{Cores.Discreto}({porSegundo:N0}/s).{Cores.Reset}");
+    $"{Palette.Title}Stopped.{Palette.Reset} {Palette.Number}{processed:N0}{Palette.Reset} number(s) stored "
+    + $"{Palette.Muted}— last:{Palette.Reset} {Palette.Number}{lastNumber}{Palette.Reset} "
+    + $"{Palette.Muted}— elapsed:{Palette.Reset} {Palette.Number}{(int)elapsed.TotalHours:D2}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}{Palette.Reset} "
+    + $"{Palette.Muted}({perSecond:N0}/s).{Palette.Reset}");
 Console.Out.Flush();
 
 return 0;
 
 // ---------------------------------------------------------------------------
 
-// Abre a trava exclusiva do banco, ou devolve null se outra instância já a
-// tem. FileShare.None é o que garante a exclusividade; DeleteOnClose evita
-// deixar o arquivo para trás.
-static FileStream? TentarTravar(string caminhoBanco)
+// Opens the database's exclusive lock, or returns null if another instance
+// already holds it. FileShare.None is what makes it exclusive; DeleteOnClose
+// keeps the file from being left behind.
+static FileStream? TryLock(string databasePath)
 {
     try
     {
         return new FileStream(
-            caminhoBanco + ".lock",
+            databasePath + ".lock",
             FileMode.Create,
             FileAccess.ReadWrite,
             FileShare.None,
@@ -306,124 +310,124 @@ static FileStream? TentarTravar(string caminhoBanco)
     }
 }
 
-static void EscreverResumo(string caminhoBanco, string caminhoEsquema, int limiteTriagem, int limiteAmpliado)
+static void WriteSummary(string databasePath, string schemaPath, int triageLimit, int deepLimit)
 {
-    bool existia = File.Exists(caminhoBanco);
+    bool existed = File.Exists(databasePath);
 
-    using Repositorio repositorio = new(caminhoBanco, caminhoEsquema);
-    Resumo resumo = repositorio.Resumir();
+    using Repository repository = new(databasePath, schemaPath);
+    Summary summary = repository.Summarise();
 
     Console.WriteLine();
-    Console.WriteLine($"{Cores.Titulo}Resumo do banco{Cores.Reset}");
-    Console.WriteLine($"{Cores.Rotulo}Arquivo:{Cores.Reset} {Cores.Numero}{caminhoBanco}{Cores.Reset} {Cores.Discreto}({new FileInfo(caminhoBanco).Length / 1024.0 / 1024.0:N1} MB){Cores.Reset}");
+    Console.WriteLine($"{Palette.Title}Database summary{Palette.Reset}");
+    Console.WriteLine($"{Palette.Label}File:{Palette.Reset} {Palette.Number}{databasePath}{Palette.Reset} {Palette.Muted}({new FileInfo(databasePath).Length / 1024.0 / 1024.0:N1} MB){Palette.Reset}");
 
-    if (!existia)
+    if (!existed)
     {
-        Console.WriteLine($"{Cores.Alerta}O banco não existia e foi criado agora, vazio.{Cores.Reset}");
+        Console.WriteLine($"{Palette.Warning}The database did not exist and was just created, empty.{Palette.Reset}");
     }
 
     Console.WriteLine();
-    Console.WriteLine($"{Cores.Rotulo}Sequência principal{Cores.Reset}");
-    EscreverItem("próximo número a calcular", resumo.ProximoNumero.ToString("N0", CultureInfo.InvariantCulture), Cores.Numero);
-    EscreverItem("palíndromos encontrados", resumo.Palindromos.ToString("N0", CultureInfo.InvariantCulture), Cores.Palindromo);
+    Console.WriteLine($"{Palette.Label}Main sequence{Palette.Reset}");
+    WriteItem("next number to compute", summary.NextNumber.ToString("N0", CultureInfo.InvariantCulture), Palette.Number);
+    WriteItem("palindromes found", summary.Solved.ToString("N0", CultureInfo.InvariantCulture), Palette.Palindrome);
 
-    EscreverFila(Tabelas.DezMil, $"triagem, limite de {limiteTriagem:N0}", resumo.DezMil, Cores.Alerta);
-    EscreverFila(Tabelas.CemMil, $"profundo, limite de {limiteAmpliado:N0}", resumo.CemMil, Cores.Iteracoes);
-    EscreverFila(Tabelas.UmMilhao, "fim da cascata, nada os reprocessa", resumo.UmMilhao, Cores.Iteracoes);
+    WriteQueue(Tables.TenThousand, $"triage, limit of {triageLimit:N0}", summary.TenThousand, Palette.Warning);
+    WriteQueue(Tables.HundredThousand, $"deep, limit of {deepLimit:N0}", summary.HundredThousand, Palette.Iterations);
+    WriteQueue(Tables.Million, "end of the cascade, nothing reprocesses these", summary.Million, Palette.Iterations);
 
     Console.WriteLine();
-    EscreverItem("total de registros", resumo.Total.ToString("N0", CultureInfo.InvariantCulture), Cores.Numero);
+    WriteItem("total rows", summary.Total.ToString("N0", CultureInfo.InvariantCulture), Palette.Number);
     Console.WriteLine();
 }
 
-static void EscreverFila(string tabela, string descricao, Fila fila, string cor)
+static void WriteQueue(string table, string description, QueueState queue, string colour)
 {
     Console.WriteLine();
-    Console.WriteLine($"{Cores.Rotulo}{tabela}{Cores.Reset} {Cores.Discreto}— {descricao}{Cores.Reset}");
-    EscreverItem("quantos", fila.Quantidade.ToString("N0", CultureInfo.InvariantCulture), cor);
-    EscreverItem("próximo da fila", fila.Proximo ?? "fila vazia", Cores.Numero);
-    EscreverItem("último que entrou", fila.Ultimo ?? "fila vazia", Cores.Discreto);
+    Console.WriteLine($"{Palette.Label}{table}{Palette.Reset} {Palette.Muted}— {description}{Palette.Reset}");
+    WriteItem("how many", queue.Count.ToString("N0", CultureInfo.InvariantCulture), colour);
+    WriteItem("next in the queue", queue.Next ?? "empty", Palette.Number);
+    WriteItem("last one added", queue.Last ?? "empty", Palette.Muted);
 }
 
-static void EscreverItem(string rotulo, string valor, string cor) =>
-    Console.WriteLine($"  {Cores.Discreto}{rotulo,-28}{Cores.Reset} {cor}{valor,16}{Cores.Reset}");
+static void WriteItem(string label, string value, string colour) =>
+    Console.WriteLine($"  {Palette.Muted}{label,-28}{Palette.Reset} {colour}{value,16}{Palette.Reset}");
 
-static void EscreverContagem(string tabela, long quantidade, string cor, string? nota)
+static void WriteCount(string table, long count, string colour, string? note)
 {
-    string linha = $"  {Cores.Discreto}{tabela,-20}{Cores.Reset} {cor}{quantidade,12:N0}{Cores.Reset}";
+    string line = $"  {Palette.Muted}{table,-20}{Palette.Reset} {colour}{count,12:N0}{Palette.Reset}";
 
-    Console.WriteLine(nota is null
-        ? linha
-        : $"{linha}  {Cores.Discreto}{nota}{Cores.Reset}");
+    Console.WriteLine(note is null
+        ? line
+        : $"{line}  {Palette.Muted}{note}{Palette.Reset}");
 }
 
-static void EscreverCabecalho()
+static void WriteHeader()
 {
     Console.WriteLine();
-    Console.WriteLine($"{Cores.Rotulo}{"Número",10} | {"Palíndromo",28} | {"Iterações",12}{Cores.Reset}");
-    Console.WriteLine($"{Cores.Separador}{new string('-', 10)}-+-{new string('-', 28)}-+-{new string('-', 12)}{Cores.Reset}");
+    Console.WriteLine($"{Palette.Label}{"Number",10} | {"Palindrome",28} | {"Iterations",12}{Palette.Reset}");
+    Console.WriteLine($"{Palette.Rule}{new string('-', 10)}-+-{new string('-', 28)}-+-{new string('-', 12)}{Palette.Reset}");
 }
 
-static void EscreverLinha(string origem, Resultado resultado)
+static void WriteRow(string source, Outcome outcome)
 {
-    string valor = resultado.Palindromo ?? "não convergiu";
-    string cor = resultado.Convergiu ? Cores.Palindromo : Cores.Alerta;
+    string value = outcome.Palindrome ?? "did not converge";
+    string colour = outcome.Converged ? Palette.Palindrome : Palette.Warning;
 
-    string iteracoes = resultado.Convergiu
-        ? resultado.Iteracoes.ToString("N0", CultureInfo.InvariantCulture)
-        : $"> {resultado.Iteracoes:N0}";
+    string iterations = outcome.Converged
+        ? outcome.Iterations.ToString("N0", CultureInfo.InvariantCulture)
+        : $"> {outcome.Iterations:N0}";
 
-    string barra = $"{Cores.Separador}|{Cores.Reset}";
+    string bar = $"{Palette.Rule}|{Palette.Reset}";
 
     Console.WriteLine(
-        $"{Cores.Numero}{origem,10}{Cores.Reset} {barra} "
-        + $"{cor}{valor,28}{Cores.Reset} {barra} "
-        + $"{cor}{iteracoes,12}{Cores.Reset}");
+        $"{Palette.Number}{source,10}{Palette.Reset} {bar} "
+        + $"{colour}{value,28}{Palette.Reset} {bar} "
+        + $"{colour}{iterations,12}{Palette.Reset}");
 }
 
-void EsvaziarAvisos()
+void DrainNotices()
 {
-    while (avisos.TryDequeue(out Aviso aviso))
+    while (notices.TryDequeue(out Notice notice))
     {
-        switch (aviso.Nivel)
+        switch (notice.Level)
         {
-            case NivelAviso.Destaque:
-                EscreverDestaque(aviso);
+            case NoticeLevel.Highlight:
+                WriteHighlight(notice);
                 break;
 
-            case NivelAviso.Atencao:
+            case NoticeLevel.Warning:
                 Console.WriteLine();
-                Console.WriteLine($"{Cores.Iteracoes}  > {aviso.Texto}{Cores.Reset}");
+                Console.WriteLine($"{Palette.Iterations}  > {notice.Text}{Palette.Reset}");
                 Console.WriteLine();
                 break;
 
             default:
-                Console.WriteLine($"{Cores.Discreto}  . {aviso.Texto}{Cores.Reset}");
+                Console.WriteLine($"{Palette.Muted}  . {notice.Text}{Palette.Reset}");
                 break;
         }
     }
 }
 
-static void EscreverDestaque(Aviso aviso)
+static void WriteHighlight(Notice notice)
 {
-    const string Titulo = "NOVO RESULTADO";
+    const string Heading = "NEW RESULT";
 
-    string[] corpo = aviso.Detalhe is null
-        ? [aviso.Texto]
-        : [aviso.Texto, aviso.Detalhe];
+    string[] body = notice.Detail is null
+        ? [notice.Text]
+        : [notice.Text, notice.Detail];
 
-    int largura = Math.Max(Titulo.Length, corpo.Max(static linha => linha.Length)) + 2;
-    string traco = new('=', largura);
+    int width = Math.Max(Heading.Length, body.Max(static line => line.Length)) + 2;
+    string rule = new('=', width);
 
     Console.WriteLine();
-    Console.WriteLine($"{Cores.Borda}+{traco}+{Cores.Reset}");
-    Console.WriteLine($"{Cores.Borda}|{Cores.Reset}{Cores.Destaque}{(' ' + Titulo).PadRight(largura)}{Cores.Reset}{Cores.Borda}|{Cores.Reset}");
+    Console.WriteLine($"{Palette.Border}+{rule}+{Palette.Reset}");
+    Console.WriteLine($"{Palette.Border}|{Palette.Reset}{Palette.Highlight}{(' ' + Heading).PadRight(width)}{Palette.Reset}{Palette.Border}|{Palette.Reset}");
 
-    foreach (string linha in corpo)
+    foreach (string line in body)
     {
-        Console.WriteLine($"{Cores.Borda}|{Cores.Reset} {Cores.Palindromo}{linha.PadRight(largura - 1)}{Cores.Reset}{Cores.Borda}|{Cores.Reset}");
+        Console.WriteLine($"{Palette.Border}|{Palette.Reset} {Palette.Palindrome}{line.PadRight(width - 1)}{Palette.Reset}{Palette.Border}|{Palette.Reset}");
     }
 
-    Console.WriteLine($"{Cores.Borda}+{traco}+{Cores.Reset}");
+    Console.WriteLine($"{Palette.Border}+{rule}+{Palette.Reset}");
     Console.WriteLine();
 }

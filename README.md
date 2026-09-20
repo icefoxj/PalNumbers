@@ -56,32 +56,32 @@ reverse-and-add steps applied to it and is over 400,000 digits long.
 ## Usage
 
 ```
-PalNumbers                      run the sequence until interrupted
-PalNumbers --resumo             print the state of the database and exit
-PalNumbers --criar-banco <path> create or update a database at that path
+PalNumbers                    run the sequence until interrupted
+PalNumbers --summary          print the state of the database and exit
+PalNumbers --create-db <path> create or update a database at that path
 ```
 
-`--resumo` performs no computation and can be run while another instance is
+`--summary` performs no computation and can be run while another instance is
 working — SQLite's WAL mode allows reading during writes:
 
 ```
-Resumo do banco
-Arquivo: ...\PalNumbers.db (158.0 MB)
+Database summary
+File: ...\PalNumbers.db (158.0 MB)
 
-Sequência principal
-  próximo número a calcular           2,129,920
-  palíndromos encontrados             1,803,827
+Main sequence
+  next number to compute              2,129,920
+  palindromes found                   1,803,827
 
-NaoConvergiram — triagem, limite de 100,000
-  quantos                               326,091
-  próximo da fila                           394
+NaoConvergiram — triage, limit of 100,000
+  how many                              326,091
+  next in the queue                         394
 
-NaoConvergiram100k — profundo, limite de 1,000,000
-  quantos                                     0
+NaoConvergiram100k — deep, limit of 1,000,000
+  how many                                    0
 
-NaoConvergiram1M — fim da cascata, nada os reprocessa
-  quantos                                     2
-  próximo da fila                           196
+NaoConvergiram1M — end of the cascade, nothing reprocesses these
+  how many                                    2
+  next in the queue                         196
 ```
 
 Console output is colour-coded via ANSI escapes. Colours switch off
@@ -145,9 +145,13 @@ instead.
 
 ## Database
 
-SQLite, created next to the executable on first run from `Database/Esquema.sql`,
+SQLite, created next to the executable on first run from `Database/Schema.sql`,
 which is copied alongside the binary. The schema is idempotent, so adding a
 table to a database that already holds data is a no-op for the existing rows.
+
+Table and column names are in Portuguese. They stay that way because there are
+millions of rows behind them, and renaming would mean migrating a live database
+for nothing but spelling.
 
 | table | holds |
 |---|---|
