@@ -14,8 +14,11 @@ namespace PalNumbers;
 // them on, following the convention most command-line tools use.
 internal static class Palette
 {
+    private const int StandardInputHandle = -10;
     private const int StandardOutputHandle = -11;
     private const uint EnableVirtualTerminalProcessing = 0x0004;
+    private const uint EnableQuickEditMode = 0x0040;
+    private const uint EnableExtendedFlags = 0x0080;
 
     public static bool Enabled { get; }
 
@@ -77,6 +80,36 @@ internal static class Palette
         if (handle != 0 && handle != -1 && GetConsoleMode(handle, out uint mode))
         {
             SetConsoleMode(handle, mode | EnableVirtualTerminalProcessing);
+        }
+    }
+
+    // Turns off QuickEdit selection on the console this process is attached to.
+    //
+    // With QuickEdit on — the default in the classic Windows console — a click
+    // in the window starts a selection and the system suspends output: the next
+    // write blocks until the selection is cleared. For a program that prints
+    // from its main loop that is not a paused display, it is a paused program.
+    // The whole sequence stops mid-block, and even Ctrl+C has no effect,
+    // because the thread that would notice the cancellation is the one stuck
+    // writing. Seen in production: a stray click froze a run for hours while the
+    // reprocessing threads, which never touch the console, carried on.
+    //
+    // The cost is losing mouse selection in that window. Windows Terminal has
+    // its own selection, which does not suspend the program.
+    public static void PreventOutputFreeze()
+    {
+        if (!OperatingSystem.IsWindows() || Console.IsOutputRedirected)
+        {
+            return;
+        }
+
+        nint handle = GetStdHandle(StandardInputHandle);
+
+        if (handle != 0 && handle != -1 && GetConsoleMode(handle, out uint mode))
+        {
+            // ENABLE_EXTENDED_FLAGS has to go along, or clearing QuickEdit is
+            // ignored.
+            SetConsoleMode(handle, (mode & ~EnableQuickEditMode) | EnableExtendedFlags);
         }
     }
 

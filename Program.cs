@@ -139,6 +139,10 @@ RegisteredWaitHandle stopWait = ThreadPool.RegisterWaitForSingleObject(
     Timeout.Infinite,
     executeOnlyOnce: true);
 
+// A selection in the console window would suspend output and, with it, the
+// whole sequence — the main loop prints from inside its own write phase.
+Palette.PreventOutputFreeze();
+
 // With several cores computing, writing to the screen becomes the bottleneck.
 // The buffer is flushed at the end of every block, so output stays live.
 StreamWriter output = new(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16)

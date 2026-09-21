@@ -109,6 +109,15 @@ Console output is colour-coded via ANSI escapes. Colours switch off
 automatically when output is redirected, and honour the `NO_COLOR` and
 `FORCE_COLOR` conventions.
 
+The run also turns QuickEdit selection off in its console window. With it on —
+the default in the classic Windows console — a click in the window starts a
+selection and the system suspends output, which blocks the next write. For a
+program that prints from its main loop that is not a paused display but a paused
+program: the sequence stops mid-block, and even `Ctrl+C` does nothing, because
+the thread that would notice the cancellation is the one stuck writing. The cost
+is losing mouse selection in that window; Windows Terminal has its own selection,
+which does not suspend the program.
+
 ## Thread layout
 
 On a machine with 32 logical processors:
