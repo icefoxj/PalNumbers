@@ -133,12 +133,20 @@ Console.CancelKeyPress += (_, e) =>
 // to start.
 using EventWaitHandle stopSignal = new(false, EventResetMode.ManualReset, StopEventName(Environment.ProcessId));
 
-RegisteredWaitHandle stopWait = ThreadPool.RegisterWaitForSingleObject(
-    stopSignal,
-    (_, _) => cancellation.Cancel(),
-    state: null,
-    Timeout.Infinite,
-    executeOnlyOnce: true);
+// A thread of its own rather than ThreadPool.RegisterWaitForSingleObject: the
+// pool can stop running work altogether, and --stop has to keep working when
+// it does.
+Thread stopWatcher = new(() =>
+{
+    stopSignal.WaitOne();
+    cancellation.Cancel();
+})
+{
+    IsBackground = true,
+    Name = "stop-watch",
+};
+
+stopWatcher.Start();
 
 // A selection in the console window would suspend output and, with it, the
 // whole sequence — the main loop prints from inside its own write phase.
@@ -201,17 +209,9 @@ foreach (Stage stage in stages)
     }
 }
 
-ParallelOptions options = new()
-{
-    MaxDegreeOfParallelism = workers,
-    CancellationToken = cancellation.Token,
-};
-
-// Every thread needs its own Calculator: it carries the digit buffers between
-// calls and is not safe for concurrent use. The pool hands them back from one
-// block to the next, so the buffers — which reach thousands of digits — are not
-// rebuilt every block.
-ConcurrentBag<Calculator> pool = [];
+// Dedicated threads, created once and kept for the life of the process. See
+// ComputePool for why the thread pool is no longer trusted with this.
+using ComputePool computePool = new(workers, MainLimit, cancellation.Token);
 
 string[] sources = new string[blockSize];
 Outcome[] outcomes = new Outcome[blockSize];
@@ -227,27 +227,11 @@ while (!cancellation.IsCancellationRequested)
         sources[i] = (number + i).ToString(CultureInfo.InvariantCulture);
     }
 
-    try
-    {
-        // Parallel.For uses the thread that calls it as one of its workers.
-        // Running it inside a Task.Run, all 'workers' workers come from the
-        // pool and this thread only waits — it is the orchestrator, and does
-        // not consume one of the cores reserved for computing.
-        await Task.Run(
-            () => Parallel.For(
-                0,
-                blockSize,
-                options,
-                () => pool.TryTake(out Calculator? free) ? free : new Calculator(),
-                (i, _, calculator) =>
-                {
-                    outcomes[i] = calculator.Compute(sources[i], MainLimit, cancellation.Token);
-                    return calculator;
-                },
-                pool.Add),
-            cancellation.Token);
-    }
-    catch (OperationCanceledException)
+    // The orchestrator hands the block to the workers and waits: it is not one
+    // of them, so the core budget stays with the sixteen.
+    computePool.Run(sources, outcomes, blockSize);
+
+    if (cancellation.IsCancellationRequested)
     {
         break;                  // incomplete block: dropped and redone later
     }
@@ -282,8 +266,6 @@ while (!cancellation.IsCancellationRequested)
 
     number += blockSize;
 }
-
-stopWait.Unregister(null);
 
 // Gives the reprocessing threads a chance to leave on their own before the
 // repository is closed under them. The deadline is total, not per thread.

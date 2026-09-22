@@ -137,10 +137,17 @@ On a machine with 32 logical processors:
 22  threads
 ```
 
-Only the 16 calculation threads count against the core budget. The
-orchestrator is deliberately kept out of it: `Parallel.For` normally runs work
-on its calling thread, so it is invoked inside a `Task.Run` and the main thread
-does nothing but coordinate.
+Only the 16 calculation threads count against the core budget; the orchestrator
+is deliberately kept out of it and does nothing but coordinate.
+
+Every one of those threads is created once at startup and lives for the life of
+the process. None of the work goes through the thread pool. That is not a
+stylistic preference: a suspended console window leaves the pool unable to
+create worker threads, and a `Parallel.For` waiting for replicas that never
+arrive took the whole sequence down in production — while the dedicated
+reprocessing threads, which ask nothing of the pool, carried on. Work inside a
+block is handed out one index at a time through an interlocked counter, which
+keeps the uneven per-number cost from leaving workers idle.
 
 Numbers are computed in blocks of 8,192. The whole block is solved in parallel,
 then written and printed in ascending order. That preserves two properties
