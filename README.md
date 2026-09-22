@@ -109,14 +109,20 @@ Console output is colour-coded via ANSI escapes. Colours switch off
 automatically when output is redirected, and honour the `NO_COLOR` and
 `FORCE_COLOR` conventions.
 
-The run also turns QuickEdit selection off in its console window. With it on —
-the default in the classic Windows console — a click in the window starts a
-selection and the system suspends output, which blocks the next write. For a
-program that prints from its main loop that is not a paused display but a paused
-program: the sequence stops mid-block, and even `Ctrl+C` does nothing, because
-the thread that would notice the cancellation is the one stuck writing. The cost
-is losing mouse selection in that window; Windows Terminal has its own selection,
-which does not suspend the program.
+Nothing that computes writes to the console. A console can stop accepting output
+at any moment and for as long as it likes — a selection in the window, Mark
+mode, `Ctrl+S`, the Pause key, a terminal that stops draining — and every write
+then blocks. Printing inline from the main loop would not pause the display, it
+would pause the program: the sequence stops mid-block, and even `Ctrl+C` does
+nothing, because the thread that would notice the cancellation is the one stuck
+writing. That happened twice in production, once for hours.
+
+So the screen has a thread of its own and a bounded queue. When the console
+stops accepting output the queue fills, lines are dropped and counted, and the
+computation carries on; the run says afterwards how many lines it never showed.
+A gap in the listing is never a gap in the work — the database has everything.
+The run also turns QuickEdit selection off, which removes the most common
+trigger, at the cost of mouse selection in that window.
 
 ## Thread layout
 
