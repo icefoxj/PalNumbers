@@ -24,6 +24,7 @@ const int MainLimit = 10_000;               // main sequence
 const int TriageLimit = 100_000;            // first step of reprocessing
 const int DeepLimit = 1_000_000;            // second step
 const int RowsPerHeader = 50;
+const int ScreenBuffer = 50_000;    // lines held while the console is busy
 
 string schemaPath = Path.Combine(AppContext.BaseDirectory, "Schema.sql");
 string databasePath = Path.Combine(AppContext.BaseDirectory, "PalNumbers.db");
@@ -143,38 +144,35 @@ RegisteredWaitHandle stopWait = ThreadPool.RegisterWaitForSingleObject(
 // whole sequence — the main loop prints from inside its own write phase.
 Palette.PreventOutputFreeze();
 
-// With several cores computing, writing to the screen becomes the bottleneck.
-// The buffer is flushed at the end of every block, so output stays live.
-StreamWriter output = new(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16)
-{
-    AutoFlush = false,
-};
-Console.SetOut(output);
+// From here on nothing that computes writes to the console directly. The
+// screen has a thread of its own, and a console that stops accepting output
+// must never stop the sequence — see Screen for what that cost in production.
+using Screen screen = new(ScreenBuffer);
 
 using Repository repository = new(databasePath, schemaPath);
 
 BigInteger number = repository.NextNumber();
 int reprocessingThreads = stages.Sum(static stage => stage.Threads);
 
-Console.WriteLine();
-Console.WriteLine($"{Palette.Title}Palindromes by reverse-and-add{Palette.Reset} {Palette.Muted}— Ctrl+C to stop.{Palette.Reset}");
-Console.WriteLine($"{Palette.Label}Database:{Palette.Reset} {Palette.Number}{databasePath}{Palette.Reset}");
-Console.WriteLine($"{Palette.Label}Compute:{Palette.Reset} {Palette.Number}{workers}{Palette.Reset} of {Environment.ProcessorCount} cores {Palette.Muted}— blocks of {blockSize:N0} numbers, limit of {MainLimit:N0}.{Palette.Reset}");
-Console.WriteLine($"{Palette.Label}Threads:{Palette.Reset} {Palette.Muted}1 orchestrator + {Palette.Reset}{Palette.Number}{workers}{Palette.Reset}{Palette.Muted} compute + {Palette.Reset}{Palette.Number}{reprocessingThreads}{Palette.Reset}{Palette.Muted} reprocessing = {1 + workers + reprocessingThreads}.{Palette.Reset}");
+screen.WriteBlank();
+screen.Write($"{Palette.Title}Palindromes by reverse-and-add{Palette.Reset} {Palette.Muted}— Ctrl+C to stop.{Palette.Reset}");
+screen.Write($"{Palette.Label}Database:{Palette.Reset} {Palette.Number}{databasePath}{Palette.Reset}");
+screen.Write($"{Palette.Label}Compute:{Palette.Reset} {Palette.Number}{workers}{Palette.Reset} of {Environment.ProcessorCount} cores {Palette.Muted}— blocks of {blockSize:N0} numbers, limit of {MainLimit:N0}.{Palette.Reset}");
+screen.Write($"{Palette.Label}Threads:{Palette.Reset} {Palette.Muted}1 orchestrator + {Palette.Reset}{Palette.Number}{workers}{Palette.Reset}{Palette.Muted} compute + {Palette.Reset}{Palette.Number}{reprocessingThreads}{Palette.Reset}{Palette.Muted} reprocessing = {1 + workers + reprocessingThreads}.{Palette.Reset}");
 
 foreach (Stage stage in stages)
 {
-    Console.WriteLine($"  {Palette.Muted}{stage.Threads} thread(s) [{stage.Name}]{Palette.Reset} {Palette.Label}{stage.SourceTable}{Palette.Reset} {Palette.Muted}-> limit {stage.Limit:N0} ->{Palette.Reset} {Palette.Label}{stage.TargetTable}{Palette.Reset}");
+    screen.Write($"  {Palette.Muted}{stage.Threads} thread(s) [{stage.Name}]{Palette.Reset} {Palette.Label}{stage.SourceTable}{Palette.Reset} {Palette.Muted}-> limit {stage.Limit:N0} ->{Palette.Reset} {Palette.Label}{stage.TargetTable}{Palette.Reset}");
 }
 
-Console.WriteLine(number.IsZero
+screen.Write(number.IsZero
     ? $"{Palette.Muted}No previous results: starting from zero.{Palette.Reset}"
     : $"{Palette.Muted}Resuming from{Palette.Reset} {Palette.Number}{number}{Palette.Reset}{Palette.Muted}.{Palette.Reset}");
 
 Counts counts = repository.Count();
 
-Console.WriteLine();
-Console.WriteLine($"{Palette.Label}Rows per table{Palette.Reset}");
+screen.WriteBlank();
+screen.Write($"{Palette.Label}Rows per table{Palette.Reset}");
 WriteCount(Tables.Solved, counts.Solved, Palette.Palindrome, "converged");
 WriteCount(Tables.TenThousand, counts.TenThousand, Palette.Warning, $"triage queue ({TriageLimit:N0})");
 WriteCount(Tables.HundredThousand, counts.HundredThousand, Palette.Iterations, $"deep stage queue ({DeepLimit:N0})");
@@ -220,6 +218,7 @@ Outcome[] outcomes = new Outcome[blockSize];
 
 Stopwatch stopwatch = Stopwatch.StartNew();
 long processed = 0;
+long droppedSeen = 0;
 
 while (!cancellation.IsCancellationRequested)
 {
@@ -270,7 +269,16 @@ while (!cancellation.IsCancellationRequested)
     // The block counts as done only once it is stored in full.
     repository.Commit();
     DrainNotices();
-    Console.Out.Flush();
+
+    // Say so when the screen could not keep up, so a gap in the listing is
+    // never mistaken for a gap in the work.
+    long droppedNow = screen.Dropped;
+
+    if (droppedNow > droppedSeen)
+    {
+        screen.Write($"{Palette.Warning}  ... {droppedNow - droppedSeen:N0} line(s) not shown: the console was not accepting output ...{Palette.Reset}");
+        droppedSeen = droppedNow;
+    }
 
     number += blockSize;
 }
@@ -303,13 +311,17 @@ string lastNumber = processed == 0
 
 double perSecond = elapsed.TotalSeconds > 0 ? processed / elapsed.TotalSeconds : 0;
 
-Console.WriteLine();
-Console.WriteLine(
+screen.WriteBlank();
+screen.Write(
     $"{Palette.Title}Stopped.{Palette.Reset} {Palette.Number}{processed:N0}{Palette.Reset} number(s) stored "
     + $"{Palette.Muted}— last:{Palette.Reset} {Palette.Number}{lastNumber}{Palette.Reset} "
     + $"{Palette.Muted}— elapsed:{Palette.Reset} {Palette.Number}{(int)elapsed.TotalHours:D2}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}{Palette.Reset} "
     + $"{Palette.Muted}({perSecond:N0}/s).{Palette.Reset}");
-Console.Out.Flush();
+
+if (screen.Dropped > 0)
+{
+    screen.Write($"{Palette.Warning}{screen.Dropped:N0} line(s) were never shown while the console was not accepting output.{Palette.Reset}");
+}
 
 return 0;
 
@@ -466,23 +478,23 @@ static void WriteQueue(string table, string description, QueueState queue, strin
 static void WriteItem(string label, string value, string colour) =>
     Console.WriteLine($"  {Palette.Muted}{label,-28}{Palette.Reset} {colour}{value,16}{Palette.Reset}");
 
-static void WriteCount(string table, long count, string colour, string? note)
+void WriteCount(string table, long count, string colour, string? note)
 {
     string line = $"  {Palette.Muted}{table,-20}{Palette.Reset} {colour}{count,12:N0}{Palette.Reset}";
 
-    Console.WriteLine(note is null
+    screen.Write(note is null
         ? line
         : $"{line}  {Palette.Muted}{note}{Palette.Reset}");
 }
 
-static void WriteHeader()
+void WriteHeader()
 {
-    Console.WriteLine();
-    Console.WriteLine($"{Palette.Label}{"Number",10} | {"Palindrome",28} | {"Iterations",12}{Palette.Reset}");
-    Console.WriteLine($"{Palette.Rule}{new string('-', 10)}-+-{new string('-', 28)}-+-{new string('-', 12)}{Palette.Reset}");
+    screen.WriteBlank();
+    screen.Write($"{Palette.Label}{"Number",10} | {"Palindrome",28} | {"Iterations",12}{Palette.Reset}");
+    screen.Write($"{Palette.Rule}{new string('-', 10)}-+-{new string('-', 28)}-+-{new string('-', 12)}{Palette.Reset}");
 }
 
-static void WriteRow(string source, Outcome outcome)
+void WriteRow(string source, Outcome outcome)
 {
     string value = outcome.Palindrome ?? "did not converge";
     string colour = outcome.Converged ? Palette.Palindrome : Palette.Warning;
@@ -493,7 +505,7 @@ static void WriteRow(string source, Outcome outcome)
 
     string bar = $"{Palette.Rule}|{Palette.Reset}";
 
-    Console.WriteLine(
+    screen.Write(
         $"{Palette.Number}{source,10}{Palette.Reset} {bar} "
         + $"{colour}{value,28}{Palette.Reset} {bar} "
         + $"{colour}{iterations,12}{Palette.Reset}");
@@ -510,19 +522,19 @@ void DrainNotices()
                 break;
 
             case NoticeLevel.Warning:
-                Console.WriteLine();
-                Console.WriteLine($"{Palette.Iterations}  > {notice.Text}{Palette.Reset}");
-                Console.WriteLine();
+                screen.WriteBlank();
+                screen.Write($"{Palette.Iterations}  > {notice.Text}{Palette.Reset}");
+                screen.WriteBlank();
                 break;
 
             default:
-                Console.WriteLine($"{Palette.Muted}  . {notice.Text}{Palette.Reset}");
+                screen.Write($"{Palette.Muted}  . {notice.Text}{Palette.Reset}");
                 break;
         }
     }
 }
 
-static void WriteHighlight(Notice notice)
+void WriteHighlight(Notice notice)
 {
     const string Heading = "NEW RESULT";
 
@@ -533,15 +545,15 @@ static void WriteHighlight(Notice notice)
     int width = Math.Max(Heading.Length, body.Max(static line => line.Length)) + 2;
     string rule = new('=', width);
 
-    Console.WriteLine();
-    Console.WriteLine($"{Palette.Border}+{rule}+{Palette.Reset}");
-    Console.WriteLine($"{Palette.Border}|{Palette.Reset}{Palette.Highlight}{(' ' + Heading).PadRight(width)}{Palette.Reset}{Palette.Border}|{Palette.Reset}");
+    screen.WriteBlank();
+    screen.Write($"{Palette.Border}+{rule}+{Palette.Reset}");
+    screen.Write($"{Palette.Border}|{Palette.Reset}{Palette.Highlight}{(' ' + Heading).PadRight(width)}{Palette.Reset}{Palette.Border}|{Palette.Reset}");
 
     foreach (string line in body)
     {
-        Console.WriteLine($"{Palette.Border}|{Palette.Reset} {Palette.Palindrome}{line.PadRight(width - 1)}{Palette.Reset}{Palette.Border}|{Palette.Reset}");
+        screen.Write($"{Palette.Border}|{Palette.Reset} {Palette.Palindrome}{line.PadRight(width - 1)}{Palette.Reset}{Palette.Border}|{Palette.Reset}");
     }
 
-    Console.WriteLine($"{Palette.Border}+{rule}+{Palette.Reset}");
-    Console.WriteLine();
+    screen.Write($"{Palette.Border}+{rule}+{Palette.Reset}");
+    screen.WriteBlank();
 }
